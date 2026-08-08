@@ -8,6 +8,35 @@ Note:
 * EBS is tied to a particular AZ.
 * EFS can be accessed from different AZ through a Security Group.
 
+## The sample app was updated, and it needed more than a tag bump
+
+The manifests deployed `wordpress:4.8-apache` and `mysql:5.6`. Pulled and inspected, that
+WordPress image is **WordPress 4.8.3 running PHP 5.6.32**, built November 2017; PHP 5.6
+has been end of life since December 2018, and MySQL 5.6 since February 2021. Both tags
+still pull, so this kept working, but it is not something to stand up on a cluster.
+
+They are `wordpress:6-apache` and `mysql:8.0` now. Swapping the tags **on its own returns
+a 500**, and finding out why took running it:
+
+| what broke | why |
+| --- | --- |
+| `Error establishing a database connection`, no `wordpress` schema | WordPress 6's entrypoint does not create the database the way 4.8's did. MySQL has to, via `MYSQL_DATABASE`. |
+| `Error establishing a database connection`, database present | The 4.8 image defaulted `DB_USER` to `root`. The current image defaults it to the literal string `'example username'`, so `WORDPRESS_DB_USER` must be set. |
+
+So the manifests also gained `MYSQL_DATABASE`, `MYSQL_USER`, `MYSQL_PASSWORD`,
+`WORDPRESS_DB_NAME` and `WORDPRESS_DB_USER`. A side benefit: WordPress now connects as a
+dedicated `wordpress` user instead of as MySQL `root`.
+
+Verified end to end on a real Kubernetes 1.30 cluster with these exact files: both pods
+Running, `GET /` returns **200** and serves the WordPress installer. `kubeconform` reports
+13 of 13 resources valid across both variants.
+
+Two notes on what that verification does **not** cover. It ran on k3s with its local-path
+storage, not on EKS with EBS or EFS, so the storage-class and volume plumbing in these
+walkthroughs is unchanged and untested here. And the passwords in the `kubectl create
+secret` examples below are literal values in a public repository: generate your own rather
+than pasting those.
+
 ## Pre reqs
 
 Please, be sure you followed the steps in [Basic AWS EKS](https://github.com/alpersonalwebsite/basic-aws-eks) and you have your cluster up and running.
