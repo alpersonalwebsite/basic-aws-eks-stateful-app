@@ -35,7 +35,31 @@ one secret key between root and the application would have meant that anything l
 application's password had leaked root's too, so the secret now carries two keys and the
 `kubectl create secret` examples generate both.
 
-Verified end to end on a real Kubernetes 1.30 cluster with these exact files: both pods
+### If you already ran this with MySQL 5.6, delete the volume first
+
+MySQL 8.0 cannot open a 5.6 data directory. Applying the new manifest over an existing
+`mysql-pv-claim` leaves the pod in CrashLoopBackOff, and the reason is only in the logs:
+
+```text
+[ERROR] [MY-013090] [InnoDB] Unsupported redo log format (v0). The redo log was created before MySQL 5.7.9
+[ERROR] [MY-011013] [Server] Failed to initialize DD Storage Engine.
+[ERROR] [MY-010020] [Server] Data Dictionary initialization failed.
+```
+
+Measured: a 5.6 datadir, then MySQL 8.0 pointed at it, container exit 1.
+
+MySQL's supported path is 5.6 → 5.7 → 8.0, one major at a time. For a walkthrough whose
+data is disposable, do not do that. Delete the claim and start clean:
+
+```shell
+kubectl delete deployment wordpress wordpress-mysql
+kubectl delete pvc mysql-pv-claim wp-pv-claim
+```
+
+Then re-apply. A fresh volume is initialised by MySQL 8.0 and the problem does not arise.
+If the data is *not* disposable, migrate through 5.7 before changing the image.
+
+Verified end-to-end on a real Kubernetes 1.30 cluster with these exact files: both pods
 Running, `GET /` returns **200** and serves the WordPress installer. `kubeconform` reports
 13 of 13 resources valid across both variants.
 
