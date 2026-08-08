@@ -23,9 +23,17 @@ a 500**, and finding out why took running it:
 | `Error establishing a database connection`, no `wordpress` schema | WordPress 6's entrypoint does not create the database the way 4.8's did. MySQL has to, via `MYSQL_DATABASE`. |
 | `Error establishing a database connection`, database present | The 4.8 image defaulted `DB_USER` to `root`. The current image defaults it to the literal string `'example username'`, so `WORDPRESS_DB_USER` must be set. |
 
+Of the two WordPress variables, only `WORDPRESS_DB_USER` is actually required:
+`WORDPRESS_DB_NAME` already defaults to `wordpress` in this image, and omitting it still
+serves the installer (checked). It is set anyway so it pairs visibly with
+`MYSQL_DATABASE` and a future change to that default cannot quietly break the walkthrough.
+
 So the manifests also gained `MYSQL_DATABASE`, `MYSQL_USER`, `MYSQL_PASSWORD`,
 `WORDPRESS_DB_NAME` and `WORDPRESS_DB_USER`. A side benefit: WordPress now connects as a
-dedicated `wordpress` user instead of as MySQL `root`.
+dedicated `wordpress` user instead of as MySQL `root`, on its **own** password. Sharing
+one secret key between root and the application would have meant that anything leaking the
+application's password had leaked root's too, so the secret now carries two keys and the
+`kubectl create secret` examples generate both.
 
 Verified end to end on a real Kubernetes 1.30 cluster with these exact files: both pods
 Running, `GET /` returns **200** and serves the WordPress installer. `kubeconform` reports
@@ -34,8 +42,12 @@ Running, `GET /` returns **200** and serves the WordPress installer. `kubeconfor
 Two notes on what that verification does **not** cover. It ran on k3s with its local-path
 storage, not on EKS with EBS or EFS, so the storage-class and volume plumbing in these
 walkthroughs is unchanged and untested here. And the passwords in the `kubectl create
-secret` examples below are literal values in a public repository: generate your own rather
-than pasting those.
+secret` examples now generate their values with `openssl rand` rather than committing
+literal passwords to a public repository.
+
+One upside not obvious from the diff: `mysql:5.6` was published for `linux/amd64` only,
+while `mysql:8.0` ships `arm64` as well, so these manifests now also run on Graviton node
+groups.
 
 ## Pre reqs
 

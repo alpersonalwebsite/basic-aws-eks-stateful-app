@@ -37,9 +37,12 @@ spec:
         env:
         - name: WORDPRESS_DB_HOST
           value: wordpress-mysql
-        # Both are required. The 4.8 image defaulted DB_USER to root; the current one
-        # defaults it to the literal string 'example username', so leaving it unset
-        # fails with "Error establishing a database connection".
+        # WORDPRESS_DB_USER is the one that is required: the 4.8 image defaulted it to
+        # root, while the current image defaults it to the literal string
+        # 'example username', so leaving it unset fails with "Error establishing a
+        # database connection". WORDPRESS_DB_NAME is set explicitly to pair with
+        # MYSQL_DATABASE below; it happens to equal the image default, and omitting it
+        # works today, but stating it means a future default change cannot surprise us.
         - name: WORDPRESS_DB_NAME
           value: wordpress
         - name: WORDPRESS_DB_USER
@@ -48,7 +51,7 @@ spec:
           valueFrom:
             secretKeyRef:
               name: mysql-password
-              key: password
+              key: wordpress-password
         ports:
         - containerPort: 80
           name: wordpress

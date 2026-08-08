@@ -45,14 +45,16 @@ spec:
         # database connection" and SHOW DATABASES lists only the system schemas.
         - name: MYSQL_DATABASE
           value: wordpress
-        # A dedicated user, so WordPress does not connect as root.
+        # A dedicated user, so WordPress does not connect as root, on its own password.
+        # Sharing one key between root and the app user would mean anything that leaked
+        # the application's password had leaked root's as well.
         - name: MYSQL_USER
           value: wordpress
         - name: MYSQL_PASSWORD
           valueFrom:
             secretKeyRef:
               name: mysql-password
-              key: password
+              key: wordpress-password
         ports:
         - containerPort: 3306
           name: mysql

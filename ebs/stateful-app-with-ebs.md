@@ -39,7 +39,8 @@ persistentvolumeclaim/wp-pv-claim created
 ### Create secret for MySQL password
 
 ```shell
-kubectl create secret generic mysql-password --from-literal=password=this-is-my-password123cd@1 --namespace=dev-stateful-ebs 
+kubectl create secret generic mysql-password --from-literal=password=$(openssl rand -base64 24) \
+  --from-literal=wordpress-password=$(openssl rand -base64 24) --namespace=dev-stateful-ebs 
 ```
 
 Output:

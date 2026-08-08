@@ -376,7 +376,8 @@ persistentvolumeclaim/efs-pv-claim created
 ### Create secret for MySQL password
 
 ```shell
-kubectl create secret generic mysql-password --from-literal=password=Jhdsg55swGsgsa23 --namespace=dev-stateful-efs
+kubectl create secret generic mysql-password --from-literal=password=$(openssl rand -base64 24) \
+  --from-literal=wordpress-password=$(openssl rand -base64 24) --namespace=dev-stateful-efs
 ```
 
 Output:
