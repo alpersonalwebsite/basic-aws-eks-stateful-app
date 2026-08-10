@@ -52,7 +52,17 @@ MySQL's supported path is 5.6 → 5.7 → 8.0, one major at a time. For a walkth
 data is disposable, do not do that. Delete the claim and start clean:
 
 The walkthroughs run in their own namespaces, so the commands need `-n`. Without it these
-operate on whatever your current context is and quietly delete nothing.
+run against whatever your current context is, which is not where the resources are. They do
+not fail silently, and the error is the useful part:
+
+```text
+Error from server (NotFound): deployments.apps "wordpress" not found
+Error from server (NotFound): deployments.apps "wordpress-mysql" not found
+```
+
+Exit status 1. Measured on Kubernetes 1.30, and it reads the same whether the namespace is
+missing or merely empty, so `NotFound` here means "you are looking in the wrong place"
+rather than "already cleaned up".
 
 **EBS variant:**
 
