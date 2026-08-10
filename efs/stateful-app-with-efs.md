@@ -397,7 +397,7 @@ Output:
 ```shell
 NAME                  TYPE                                  DATA   AGE
 default-token-fnzpq   kubernetes.io/service-account-token   3      32m
-mysql-password        Opaque                                1      50s
+mysql-password        Opaque                                2      50s
 ```
 
 ### Create Service and Deployment for MySQL

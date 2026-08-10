@@ -46,17 +46,36 @@ MySQL 8.0 cannot open a 5.6 data directory. Applying the new manifest over an ex
 [ERROR] [MY-010020] [Server] Data Dictionary initialization failed.
 ```
 
-Measured: a 5.6 datadir, then MySQL 8.0 pointed at it, container exit 1.
+Measured: a 5.6 datadir, then MySQL 8.0 pointed at it, the container exited with code 1.
 
 MySQL's supported path is 5.6 → 5.7 → 8.0, one major at a time. For a walkthrough whose
 data is disposable, do not do that. Delete the claim and start clean:
 
+The walkthroughs run in their own namespaces, so the commands need `-n`. Without it these
+operate on whatever your current context is and quietly delete nothing.
+
+**EBS variant:**
+
 ```shell
-kubectl delete deployment wordpress wordpress-mysql
-kubectl delete pvc mysql-pv-claim wp-pv-claim
+kubectl -n dev-stateful-ebs delete deployment wordpress wordpress-mysql
+kubectl -n dev-stateful-ebs delete pvc mysql-pv-claim wp-pv-claim
 ```
 
-Then re-apply. A fresh volume is initialised by MySQL 8.0 and the problem does not arise.
+**EFS variant** — and deleting the claim is **not enough here**:
+
+```shell
+kubectl -n dev-stateful-efs delete deployment wordpress wordpress-mysql
+kubectl -n dev-stateful-efs delete pvc efs-pv-claim
+```
+
+`efs/eks/pv.yaml` sets `persistentVolumeReclaimPolicy: Retain` against a fixed
+`volumeHandle`, so the data survives the claim. A new claim binds the same file system and
+MySQL 8.0 finds the 5.6 directory exactly as before. When the data is disposable, empty the
+MySQL directory on the file system itself — mount it from a helper pod or an EC2 instance in
+the same VPC and remove its contents — before re-applying.
+
+Then re-apply. A freshly initialised volume is created by MySQL 8.0 and the problem does not
+arise.
 If the data is *not* disposable, migrate through 5.7 before changing the image.
 
 Verified end-to-end on a real Kubernetes 1.30 cluster with these exact files: both pods

@@ -60,7 +60,7 @@ Output:
 ```shell
 NAME                  TYPE                                  DATA   AGE
 default-token-k7cmf   kubernetes.io/service-account-token   3      14m
-mysql-password        Opaque                                1      85s
+mysql-password        Opaque                                2      85s
 ```
 
 ### Create Service and Deployment for MySQL

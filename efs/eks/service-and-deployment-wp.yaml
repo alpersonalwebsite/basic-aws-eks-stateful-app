@@ -61,4 +61,11 @@ spec:
       volumes:
       - name: wordpress-persistent-storage
         persistentVolumeClaim:
-          claimName: efs-pvc-claim
+          # efs-pv-claim, not efs-pvc-claim. The only PVC defined for this variant is
+          # efs/eks/pvc.yaml -> efs-pv-claim, so the old name resolved to nothing and this
+          # pod could never be scheduled. Note both deployments now name the same claim:
+          # that is how the single-PVC EFS variant was written, and it means MySQL's datadir
+          # and WordPress's html tree land on one file system root. Separate subPath mounts
+          # would be the proper fix; that needs an EFS file system to test against and is
+          # deliberately not attempted here.
+          claimName: efs-pv-claim
