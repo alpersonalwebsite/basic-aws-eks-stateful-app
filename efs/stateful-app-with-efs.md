@@ -133,7 +133,7 @@ aws ec2 authorize-security-group-ingress \
 
 Output:
 
-```shell
+```json
 {
     "Return": true,
     "SecurityGroupRules": [
@@ -421,7 +421,7 @@ kubectl get pods -o wide -n dev-stateful-efs
 
 Output:
 
-```shell
+```text
 NAME                               READY   STATUS    RESTARTS   AGE     IP              NODE                                         NOMINATED NODE   READINESS GATES
 wordpress-mysql-7d5dc78494-vvfxk   1/1     Running   0          7m29s   192.168.47.27   ip-192-168-53-8.us-west-1.compute.internal   <none>           <none>
 ```
@@ -442,7 +442,7 @@ sudo mount | grep csi
 
 Sample output:
 
-```shell
+```text
 127.0.0.1:/ on /var/lib/kubelet/pods/414ce7a8-ade5-4e1b-a2ea-d7e7350e80d9/volumes/kubernetes.io~csi/efs-psv-eks/mount type nfs4 (rw,relatime,vers=4.1,rsize=1048576,wsize=1048576,namlen=255,hard,noresvport,proto=tcp,port=20079,timeo=600,retrans=2,sec=sys,clientaddr=127.0.0.1,local_lock=none,addr=127.0.0.1)
 ```
 
@@ -524,45 +524,71 @@ deployment.apps "wordpress-mysql" deleted
 
 ### EFS
 
-Go to `EFS` in `AWS Console` https://us-west-1.console.aws.amazon.com/efs/home?region=us-west-1#/file-systems: and delete the filesystem (example: EKSwithEFS)
-
-Then, run `kubectl get pv` and delete the following `pv`
-* efs-psv-eks
+**Claim first, then the PV, and the file system outlives both.** This differs from the EBS
+variant, and the difference is the reclaim policy: `efs/eks/pv.yaml` sets
+`persistentVolumeReclaimPolicy: Retain` against a fixed `volumeHandle`. Under `Retain`,
+deleting the claim moves the PV to `Released` rather than deleting it, and nothing touches the
+data.
 
 ```shell
+kubectl -n dev-stateful-efs delete pvc efs-pv-claim
+
 kubectl delete pv efs-psv-eks
 ```
 
-Sample output:
+The `-n` is not optional for the claim: it lives in `dev-stateful-efs`, so without it the
+command runs against your current context, reports `NotFound`, and the claim survives. The PV
+takes no namespace, because a PersistentVolume is cluster-scoped.
 
-```shell
-persistentvolume "efs-psv-eks" deleted
-```
+**Deleting both leaves the data intact**, which is the part that surprises people. The file
+system and everything in it survive, and because the PV names a fixed `volumeHandle`, re-applying
+`efs/eks/pv.yaml` and the claim binds the same file system and the old WordPress install is
+still there. So this step is required rather than tidying, and it is the only one that removes
+the data:
 
-At this point, if you check your pvs you will see they are in terminating status:
+Go to `EFS` in `AWS Console` https://us-west-1.console.aws.amazon.com/efs/home?region=us-west-1#/file-systems: and delete the filesystem (example: EKSwithEFS)
 
-```shell
+Do that **after** the Kubernetes objects, not before. Deleting the file system first leaves the
+PV pointing at a `volumeHandle` that no longer exists.
+
+<details>
+<summary>What this section used to say, and why it left the PV stuck in Terminating</summary>
+
+The original deleted the file system in the console first, then ran `kubectl delete pv` while
+the claim still existed. A PV cannot finish deleting while a claim is bound to it, so it sat in
+`Terminating`:
+
+```text
 NAME          CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS        CLAIM                           STORAGECLASS   REASON   AGE
 efs-psv-eks   20Gi       RWX            Retain           Terminating   dev-stateful-efs/efs-pv-claim   efs-sc                  24h
 ```
 
-Now, we are going to set the status to lost
+It then cleared the finalizer by hand, described as setting the status to lost:
 
-```shell
+```text
 kubectl patch pv efs-psv-eks -p '{"metadata":{"finalizers":null}}'
 ```
 
-Output:
+That removes the API object without releasing anything, and it is only needed because the
+deletion happened in the wrong order. Both blocks are quoted so the old instructions are
+recognisable, not to be run.
 
-```shell
-persistentvolume/efs-psv-eks patched
-```
+</details>
+
+**Not re-verified against EFS.** The corrected order is the documented behaviour of the
+`Retain` reclaim policy, and this repository's verification ran on k3s with local-path storage,
+not on EKS with EFS. See the README for what was and was not exercised.
 
 ### Delete secret
 
 ```shell
-kubectl delete secret mysql-password
+kubectl delete secret mysql-password --namespace=dev-stateful-efs
 ```
+
+The secret was created with `--namespace=dev-stateful-efs`, so deleting it needs the same flag.
+Without it, measured on Kubernetes 1.31: `Error from server (NotFound): secrets
+"mysql-password" not found`, exit status 1, and the secret holding the MySQL root password and
+the WordPress database password stays in the cluster.
 
 **The following part is the DELETE section of `basic-aws-eks`**
 
@@ -596,7 +622,7 @@ eksctl delete cluster -f eks/cluster-autoscaling.yaml
 
 Output:
 
-```shell
+```text
 2022-08-09 10:02:07 [ℹ]  deleting EKS cluster "basic-eks-cluster"
 2022-08-09 10:02:07 [ℹ]  deleted 0 Fargate profile(s)
 2022-08-09 10:02:08 [✔]  kubeconfig has been updated
@@ -606,10 +632,26 @@ Output:
 2022-08-09 10:02:09 [✔]  all cluster resources were deleted
 ```
 
-### Delete CFN tacks
+### Delete the CFN stack
+
+This is the step that removes the IAM users and their access keys. It used to name
+`service-support`, a stack this project never creates, so the documented cleanup left the users
+and any keys made for them active:
 
 ```shell
-aws cloudformation delete-stack --stack-name 	service-support
+aws cloudformation delete-stack --stack-name eks-project --region us-west-1
+```
+
+If you created access keys, delete them explicitly first, since that is what actually revokes
+them:
+
+```shell
+for u in eks-operator eks-admin-user eks-user; do
+  for k in $(aws iam list-access-keys --user-name "$u" \
+               --query 'AccessKeyMetadata[].AccessKeyId' --output text 2>/dev/null); do
+    aws iam delete-access-key --user-name "$u" --access-key-id "$k"
+  done
+done
 ```
 
 ### Delete user password from parameter store

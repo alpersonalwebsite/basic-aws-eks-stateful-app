@@ -153,28 +153,37 @@ deployment.apps "wordpress-mysql" deleted
 
 ### EBS volumes
 
-Go to `Volumes` in `AWS Console` https://us-west-1.console.aws.amazon.com/ec2/v2/home?region=us-west-1#Volumes: and delete the pvc (the ones to delete should all be in available state)
-
-Then, run `kubectl get pv` and delete the following `pv`
-* dev-stateful-ebs/mysql-pv-claim (name: pvc-88172a08-22f9-4523-8cf0-701ef88dd04d)   
-* dev-stateful-ebs/wp-pv-claim (name: pvc-75f605cd-9b97-4315-ae46-0bfa13d4f5c2)
+**Delete the claim, and the rest follows. Do not start in the console.** The sample output
+below shows these PVs with `RECLAIM POLICY: Delete`, which is what the default `gp2`
+StorageClass sets. Under that policy, deleting the PVC releases the PV, Kubernetes deletes the
+PV, and the EBS CSI driver deletes the backing volume. One command covers all three:
 
 ```shell
-kubectl delete pv pvc-88172a08-22f9-4523-8cf0-701ef88dd04d
-
-kubectl delete pv pvc-75f605cd-9b97-4315-ae46-0bfa13d4f5c2
+kubectl -n dev-stateful-ebs delete pvc mysql-pv-claim wp-pv-claim
 ```
 
-Sample output:
+The `-n` is not optional: both claims live in `dev-stateful-ebs`, so without it this runs
+against your current context and reports `NotFound` while the claims survive.
+
+Then confirm, rather than assuming:
 
 ```shell
-persistentvolume "pvc-88172a08-22f9-4523-8cf0-701ef88dd04d" force deleted
+kubectl get pv
+
+aws ec2 describe-volumes --region us-west-1 \
+  --filters "Name=tag:kubernetes.io/created-for/pvc/namespace,Values=dev-stateful-ebs" \
+  --query 'Volumes[].{id:VolumeId,state:State}' --output table
 ```
 
-At this point, if you check your pvs you will see they are in terminating status:
+<details>
+<summary>What this section used to say, and why it left PVs stuck in Terminating</summary>
 
-```shell
-kubectl get pv 
+The original deleted the EBS volumes in the EC2 console first, then ran `kubectl delete pv`
+directly on PVs whose PVCs still existed. A PV cannot finish deleting while a claim is bound
+to it, so both sat in `Terminating`:
+
+```text
+kubectl get pv
 NAME                                       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS        CLAIM                                    STORAGECLASS   REASON   AGE
 pvc-28f1129c-ad1d-45df-8e52-8ab24c578ce5   8Gi        RWO            Delete           Bound         default/redis-data-redis-test-slave-0    gp2                     13d
 pvc-4018b8ff-ff94-4ed9-8c5f-3148f77b7169   8Gi        RWO            Delete           Bound         default/redis-data-redis-test-master-0   gp2                     13d
@@ -183,19 +192,38 @@ pvc-7d93df27-9460-4fb5-9790-884aba63237b   8Gi        RWO            Delete     
 pvc-88172a08-22f9-4523-8cf0-701ef88dd04d   20Gi       RWO            Delete           Terminating   dev-stateful-ebs/mysql-pv-claim          gp2                     6d22h
 ```
 
-Now, we are going to set the status to lost
+It then cleared the finalizer by hand, described as setting the status to lost:
 
-```shell
+```text
 kubectl patch pv pvc-88172a08-22f9-4523-8cf0-701ef88dd04d -p '{"metadata":{"finalizers":null}}'
-
 kubectl patch pv pvc-75f605cd-9b97-4315-ae46-0bfa13d4f5c2 -p '{"metadata":{"finalizers":null}}'
 ```
+
+That deletes the API object without releasing anything, and it is only ever needed because the
+deletion happened in the wrong order. It also hides a real failure: if the CSI driver could not
+delete the volume, clearing the finalizer removes the evidence and you keep paying for the EBS
+volume. Both blocks are quoted here so the old instructions are recognisable, not to be run.
+
+The PV names above are from the 2022 run and are specific to that cluster, which is the other
+reason to delete claims by name instead: `mysql-pv-claim` and `wp-pv-claim` are stable, and
+`pvc-88172a08-...` is not.
+
+</details>
+
+**Not re-verified against EBS.** The corrected order is the documented behaviour of the
+`Delete` reclaim policy, and the repository's verification ran on k3s with local-path storage,
+not on EKS with EBS. See the README for what was and was not exercised.
 
 ### Delete secret
 
 ```shell
-kubectl delete secret mysql-password
+kubectl delete secret mysql-password --namespace=dev-stateful-ebs
 ```
+
+The secret was created with `--namespace=dev-stateful-ebs`, so deleting it needs the same flag.
+Without it, measured on Kubernetes 1.31: `Error from server (NotFound): secrets
+"mysql-password" not found`, exit status 1, and the secret holding the MySQL root password and
+the WordPress database password stays in the cluster.
 
 **The following part is the DELETE section of `basic-aws-eks`**
 
@@ -228,7 +256,7 @@ eksctl delete cluster -f eks/cluster-autoscaling.yaml
 
 Output:
 
-```shell
+```text
 2022-08-09 10:02:07 [ℹ]  deleting EKS cluster "basic-eks-cluster"
 2022-08-09 10:02:07 [ℹ]  deleted 0 Fargate profile(s)
 2022-08-09 10:02:08 [✔]  kubeconfig has been updated
@@ -238,10 +266,26 @@ Output:
 2022-08-09 10:02:09 [✔]  all cluster resources were deleted
 ```
 
-### Delete CFN tacks
+### Delete the CFN stack
+
+This is the step that removes the IAM users and their access keys. It used to name
+`service-support`, a stack this project never creates, so the documented cleanup left the users
+and any keys made for them active:
 
 ```shell
-aws cloudformation delete-stack --stack-name 	service-support
+aws cloudformation delete-stack --stack-name eks-project --region us-west-1
+```
+
+If you created access keys, delete them explicitly first, since that is what actually revokes
+them:
+
+```shell
+for u in eks-operator eks-admin-user eks-user; do
+  for k in $(aws iam list-access-keys --user-name "$u" \
+               --query 'AccessKeyMetadata[].AccessKeyId' --output text 2>/dev/null); do
+    aws iam delete-access-key --user-name "$u" --access-key-id "$k"
+  done
+done
 ```
 
 ### Delete user password from parameter store
