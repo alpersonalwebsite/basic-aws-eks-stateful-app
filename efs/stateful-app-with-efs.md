@@ -380,6 +380,39 @@ kubectl create secret generic mysql-password --from-literal=password=$(openssl r
   --from-literal=wordpress-password=$(openssl rand -base64 24) --namespace=dev-stateful-efs
 ```
 
+⚠️ **Only generate fresh values against an empty file system.** This variant retains its EFS
+data (`persistentVolumeReclaimPolicy: Retain`), so on a second run through this walkthrough the
+MySQL directory already exists — and **MySQL only applies `MYSQL_PASSWORD` when it initialises an
+empty data directory**. Generate a new secret over retained data and the `wordpress` database
+account keeps its *old* password while WordPress is handed the new one, so the app cannot connect
+and neither side reports anything about a password mismatch.
+
+Measured on `mysql:8.0`, reusing one volume across two starts:
+
+```text
+run 1, empty datadir,  MYSQL_PASSWORD=FIRSTPASS   -> wordpress user created with FIRSTPASS
+run 2, same volume,    MYSQL_PASSWORD=SECONDPASS  -> ERROR 1045 (28000): Access denied
+                                                     for user 'wordpress'@'localhost'
+run 2, same volume,    old FIRSTPASS              -> still works
+```
+
+So on a re-run, pick one:
+
+- **Keep the data**: do not recreate the secret. Leave the existing `mysql-password` in place, and
+  if it is gone, recover the values rather than inventing them:
+
+  ```shell
+  kubectl get secret mysql-password --namespace=dev-stateful-efs \
+    -o jsonpath='{.data.wordpress-password}' | base64 -d; echo
+  ```
+
+- **Start clean**: delete the EFS file system, or empty the `mysql/` directory on it, *before*
+  creating a new secret. The [Clean up](#efs) section covers this, and note that deleting the PVC
+  and PV does **not** remove the data.
+
+The EBS variant does not have this problem in the same way: its volumes are `Delete` reclaim
+policy, so a fresh run genuinely starts empty.
+
 Output:
 
 ```shell
@@ -645,25 +678,46 @@ deletion fails", with access keys named explicitly and `DeleteConflict` (HTTP 40
 Keys you created by hand are not part of the stack, so leaving them in place can fail the
 delete and leave the users, and their keys, in the account.
 
-```shell
-for u in eks-operator eks-admin-user eks-user; do
-  for k in $(aws iam list-access-keys --user-name "$u" \
-               --query 'AccessKeyMetadata[].AccessKeyId' --output text 2>/dev/null); do
-    aws iam delete-access-key --user-name "$u" --access-key-id "$k"
-  done
-done
-```
-
-Then the stack, and wait for it rather than assuming it worked:
+The usernames come off the deployed stack rather than being hard-coded, because
+`eks-operator`, `eks-admin-user` and `eks-user` are only the parameter *defaults* in
+`cfn/eks-project.yml`. That is a second reason this runs before the delete: the stack must still
+exist to be queried.
 
 ```shell
-aws cloudformation delete-stack --stack-name eks-project --region us-west-1
-
-aws cloudformation wait stack-delete-complete --stack-name eks-project --region us-west-1
+aws cloudformation describe-stacks \
+  --stack-name eks-project \
+  --region us-west-1 \
+  --query "Stacks[0].Parameters[?ParameterKey=='EKSUserName'||ParameterKey=='EKSAdminUserName'||ParameterKey=='EKSRegularUserName'].ParameterValue" \
+  --output text \
+  | tr '\t' '\n' \
+  | while read -r u; do
+      [ -n "$u" ] || continue
+      for k in $(aws iam list-access-keys --user-name "$u" \
+                   --query 'AccessKeyMetadata[].AccessKeyId' --output text 2>/dev/null); do
+        echo "deleting access key $k for $u"
+        aws iam delete-access-key --user-name "$u" --access-key-id "$k"
+      done
+    done
 ```
 
-`wait` exits non-zero if the delete fails, which is how you find out about a `DeleteConflict`
-instead of discovering the users months later.
+`tr` plus `while read` rather than `USERS=$(...)`, because `--output text` returns the names
+tab-separated on one line and **zsh does not word-split an unquoted variable**, so the shorter
+form collapses all three into a single name on a default macOS shell.
+
+Then the stack, with the delete guarded before the wait:
+
+```shell
+if aws cloudformation delete-stack --stack-name eks-project --region us-west-1; then
+  aws cloudformation wait stack-delete-complete --stack-name eks-project --region us-west-1
+else
+  echo "delete-stack failed, so not waiting on it" >&2
+fi
+```
+
+`wait` turns a failed deletion into a non-zero exit rather than something found months later, but
+it is a bad way to learn the delete call itself was rejected: its waiter is `delay=30s` with
+`maxAttempts=120`, so 60 minutes before exit 255, and no acceptor matches a stack left untouched
+in `CREATE_COMPLETE`. The `if` reports that case immediately.
 
 ### Delete user password from parameter store
 

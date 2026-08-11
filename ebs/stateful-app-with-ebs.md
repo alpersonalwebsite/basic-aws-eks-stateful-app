@@ -279,25 +279,46 @@ deletion fails", with access keys named explicitly and `DeleteConflict` (HTTP 40
 Keys you created by hand are not part of the stack, so leaving them in place can fail the
 delete and leave the users, and their keys, in the account.
 
-```shell
-for u in eks-operator eks-admin-user eks-user; do
-  for k in $(aws iam list-access-keys --user-name "$u" \
-               --query 'AccessKeyMetadata[].AccessKeyId' --output text 2>/dev/null); do
-    aws iam delete-access-key --user-name "$u" --access-key-id "$k"
-  done
-done
-```
-
-Then the stack, and wait for it rather than assuming it worked:
+The usernames come off the deployed stack rather than being hard-coded, because
+`eks-operator`, `eks-admin-user` and `eks-user` are only the parameter *defaults* in
+`cfn/eks-project.yml`. That is a second reason this runs before the delete: the stack must still
+exist to be queried.
 
 ```shell
-aws cloudformation delete-stack --stack-name eks-project --region us-west-1
-
-aws cloudformation wait stack-delete-complete --stack-name eks-project --region us-west-1
+aws cloudformation describe-stacks \
+  --stack-name eks-project \
+  --region us-west-1 \
+  --query "Stacks[0].Parameters[?ParameterKey=='EKSUserName'||ParameterKey=='EKSAdminUserName'||ParameterKey=='EKSRegularUserName'].ParameterValue" \
+  --output text \
+  | tr '\t' '\n' \
+  | while read -r u; do
+      [ -n "$u" ] || continue
+      for k in $(aws iam list-access-keys --user-name "$u" \
+                   --query 'AccessKeyMetadata[].AccessKeyId' --output text 2>/dev/null); do
+        echo "deleting access key $k for $u"
+        aws iam delete-access-key --user-name "$u" --access-key-id "$k"
+      done
+    done
 ```
 
-`wait` exits non-zero if the delete fails, which is how you find out about a `DeleteConflict`
-instead of discovering the users months later.
+`tr` plus `while read` rather than `USERS=$(...)`, because `--output text` returns the names
+tab-separated on one line and **zsh does not word-split an unquoted variable**, so the shorter
+form collapses all three into a single name on a default macOS shell.
+
+Then the stack, with the delete guarded before the wait:
+
+```shell
+if aws cloudformation delete-stack --stack-name eks-project --region us-west-1; then
+  aws cloudformation wait stack-delete-complete --stack-name eks-project --region us-west-1
+else
+  echo "delete-stack failed, so not waiting on it" >&2
+fi
+```
+
+`wait` turns a failed deletion into a non-zero exit rather than something found months later, but
+it is a bad way to learn the delete call itself was rejected: its waiter is `delay=30s` with
+`maxAttempts=120`, so 60 minutes before exit 255, and no acceptor matches a stack left untouched
+in `CREATE_COMPLETE`. The `if` reports that case immediately.
 
 ### Delete user password from parameter store
 
