@@ -636,14 +636,14 @@ Output:
 
 This is the step that removes the IAM users and their access keys. It used to name
 `service-support`, a stack this project never creates, so the documented cleanup left the users
-and any keys made for them active:
+and any keys made for them active.
 
-```shell
-aws cloudformation delete-stack --stack-name eks-project --region us-west-1
-```
-
-If you created access keys, delete them explicitly first, since that is what actually revokes
-them:
+**Delete the access keys first, then the stack.** The order is not cosmetic. A stack delete
+tears down the `AWS::IAM::User` resources, and per AWS's `DeleteUser` API reference, "when you
+delete a user programmatically, you must delete the items attached to the user manually, or the
+deletion fails", with access keys named explicitly and `DeleteConflict` (HTTP 409) as the error.
+Keys you created by hand are not part of the stack, so leaving them in place can fail the
+delete and leave the users, and their keys, in the account.
 
 ```shell
 for u in eks-operator eks-admin-user eks-user; do
@@ -653,6 +653,17 @@ for u in eks-operator eks-admin-user eks-user; do
   done
 done
 ```
+
+Then the stack, and wait for it rather than assuming it worked:
+
+```shell
+aws cloudformation delete-stack --stack-name eks-project --region us-west-1
+
+aws cloudformation wait stack-delete-complete --stack-name eks-project --region us-west-1
+```
+
+`wait` exits non-zero if the delete fails, which is how you find out about a `DeleteConflict`
+instead of discovering the users months later.
 
 ### Delete user password from parameter store
 

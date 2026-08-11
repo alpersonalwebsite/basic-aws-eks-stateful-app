@@ -60,9 +60,20 @@ Error from server (NotFound): deployments.apps "wordpress" not found
 Error from server (NotFound): deployments.apps "wordpress-mysql" not found
 ```
 
-Exit status 1. Measured on Kubernetes 1.30, and it reads the same whether the namespace is
-missing or merely empty, so `NotFound` here means "you are looking in the wrong place"
-rather than "already cleaned up".
+Exit status 1. Measured on Kubernetes 1.30 — but do not read too much into it. `NotFound` is
+ambiguous three ways: the namespace does not exist, it exists and is empty, or you are in the
+right namespace and the deployments really were already deleted. The message is identical in all
+three, so it cannot tell you which you are in. Check before concluding:
+
+```shell
+kubectl get namespace dev-stateful-ebs
+
+kubectl get deployment,pvc,secret -n dev-stateful-ebs
+```
+
+If the namespace is missing, you are in the wrong place or it is already gone. If it exists and
+lists nothing, the cleanup is done. An earlier version of this README claimed `NotFound` meant
+"you are looking in the wrong place"; that is one of the three cases, not the meaning.
 
 **EBS variant:**
 
@@ -79,14 +90,59 @@ kubectl -n dev-stateful-efs delete pvc efs-pv-claim
 ```
 
 `efs/eks/pv.yaml` sets `persistentVolumeReclaimPolicy: Retain` against a fixed
-`volumeHandle`, so the data survives the claim. A new claim binds the same file system and
-MySQL 8.0 finds the 5.6 directory exactly as before. When the data is disposable, empty the
-MySQL directory on the file system itself — mount it from a helper pod or an EC2 instance in
-the same VPC and remove its contents — before re-applying.
+`volumeHandle`, so the data survives the claim. Two consequences, and the first one is a step
+this README used to omit.
+
+**The retained PV will not accept a new claim.** Under `Retain`, deleting the claim moves the PV
+to `Released` and it *keeps* `spec.claimRef`, pinned to the deleted claim's UID. A replacement
+PVC has a new UID, so it never binds and sits in `Pending` indefinitely. Measured on Kubernetes
+1.31:
+
+```text
+after deleting the claim:  PV Released, claimRef efs-pv-claim uid 24e8cd65…
+new PVC applied:           uid 42c8beaf…  (different)
+new PVC after 90s:         Pending
+after removing only spec.claimRef from the PV:  PV Bound, PVC Bound
+```
+
+That last line is the control: nothing else changed, so the stale `claimRef` is the cause. So
+release the PV before re-applying, either by deleting and recreating it with the same
+`volumeHandle`:
+
+```shell
+kubectl delete pv efs-psv-eks
+kubectl apply -f efs/eks/pv.yaml
+```
+
+or by clearing the reference on the existing one:
+
+```shell
+kubectl patch pv efs-psv-eks --type=json -p '[{"op":"remove","path":"/spec/claimRef"}]'
+```
+
+**Releasing the PV does not touch the data.** The file system and its contents survive, so once
+the claim binds again MySQL 8.0 finds the same 5.6 directory and fails exactly as before. When
+the data is disposable, empty the MySQL directory on the file system itself — mount it from a
+helper pod or an EC2 instance in the same VPC and remove its contents — before re-applying. Note
+that with the `subPath` change the MySQL files live under a `mysql/` directory on the volume
+rather than at its root.
 
 Then re-apply. A freshly initialised volume is created by MySQL 8.0 and the problem does not
-arise.
-If the data is *not* disposable, migrate through 5.7 before changing the image.
+arise. If the data is *not* disposable, migrate through 5.7 before changing the image.
+
+**The EFS variant shared one directory between MySQL and Apache.** Both deployments mount the
+same `efs-pv-claim`, which is the point of EFS being ReadWriteMany, but neither mount set
+`subPath`, so both landed on the volume's *root*: `/var/lib/mysql` and `/var/www/html` were the
+same directory and the database files sat inside the web server's document root. Measured on
+`wordpress:6.7-apache`, a file written into `/var/www/html` is served with **HTTP 200 and its
+contents**, so `GET /ibdata1` returns the InnoDB tablespace and `GET /wordpress/wp_users.ibd` the
+users table, with no authentication. Both mounts now carry a `subPath` (`mysql` and `wordpress`),
+which keeps them in separate directories on the one file system. The EBS variant was never
+affected, since it uses two distinct claims.
+
+That changes the on-volume layout: an existing file system has the data at its root, and after
+this change the pods look under `mysql/` and `wordpress/`. For a disposable walkthrough, start
+from an empty file system.
 
 Verified end-to-end on a real Kubernetes 1.30 cluster with these exact files: both pods
 Running, `GET /` returns **200** and serves the WordPress installer. `kubeconform` reports
