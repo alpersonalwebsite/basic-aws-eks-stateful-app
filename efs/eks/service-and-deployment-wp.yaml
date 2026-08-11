@@ -58,6 +58,10 @@ spec:
         volumeMounts:
         - name: wordpress-persistent-storage
           mountPath: /var/www/html
+          # See the note in service-and-deployment-mysql.yaml. Both deployments share
+          # efs-pv-claim, so each needs its own subPath or the document root and the MySQL
+          # datadir are the same directory.
+          subPath: wordpress
       volumes:
       - name: wordpress-persistent-storage
         persistentVolumeClaim:

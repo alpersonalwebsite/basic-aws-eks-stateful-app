@@ -61,6 +61,15 @@ spec:
         volumeMounts:
         - name: mysql-persistent-storage
           mountPath: /var/lib/mysql
+          # subPath is what keeps the database off the web server's document root.
+          # Both deployments in this variant mount the SAME claim (efs-pv-claim), because
+          # EFS is ReadWriteMany and one file system is the point. Without subPath both
+          # mount its ROOT, so /var/lib/mysql and /var/www/html are the same directory and
+          # MySQL's data files sit inside the docroot, where Apache serves them.
+          # Measured on wordpress:6.7-apache: a file placed in /var/www/html is returned
+          # with HTTP 200 and its contents, so `GET /ibdata1` hands out the InnoDB
+          # tablespace and `GET /wordpress/wp_users.ibd` the users table. No auth involved.
+          subPath: mysql
       volumes:
       - name: mysql-persistent-storage
         persistentVolumeClaim:
