@@ -32,7 +32,7 @@ spec:
         tier: mysql
     spec:
       containers:
-      - image: mysql:5.6
+      - image: mysql:8.0
         name: mysql
         env:
         - name: MYSQL_ROOT_PASSWORD
@@ -40,12 +40,36 @@ spec:
             secretKeyRef:
               name: mysql-password
               key: password
+        # WordPress 6 does not create the database for you the way 4.8 did, so MySQL
+        # has to. Without this the site answers 500 with "Error establishing a
+        # database connection" and SHOW DATABASES lists only the system schemas.
+        - name: MYSQL_DATABASE
+          value: wordpress
+        # A dedicated user, so WordPress does not connect as root, on its own password.
+        # Sharing one key between root and the app user would mean anything that leaked
+        # the application's password had leaked root's as well.
+        - name: MYSQL_USER
+          value: wordpress
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-password
+              key: wordpress-password
         ports:
         - containerPort: 3306
           name: mysql
         volumeMounts:
         - name: mysql-persistent-storage
           mountPath: /var/lib/mysql
+          # subPath is what keeps the database off the web server's document root.
+          # Both deployments in this variant mount the SAME claim (efs-pv-claim), because
+          # EFS is ReadWriteMany and one file system is the point. Without subPath both
+          # mount its ROOT, so /var/lib/mysql and /var/www/html are the same directory and
+          # MySQL's data files sit inside the docroot, where Apache serves them.
+          # Measured on wordpress:6.7-apache: a file placed in /var/www/html is returned
+          # with HTTP 200 and its contents, so `GET /ibdata1` hands out the InnoDB
+          # tablespace and `GET /wordpress/wp_users.ibd` the users table. No auth involved.
+          subPath: mysql
       volumes:
       - name: mysql-persistent-storage
         persistentVolumeClaim:

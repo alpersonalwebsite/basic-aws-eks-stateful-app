@@ -32,23 +32,44 @@ spec:
         tier: frontend
     spec:
       containers:
-      - image: wordpress:4.8-apache
+      - image: wordpress:6-apache
         name: wordpress
         env:
         - name: WORDPRESS_DB_HOST
           value: wordpress-mysql
+        # WORDPRESS_DB_USER is the one that is required: the 4.8 image defaulted it to
+        # root, while the current image defaults it to the literal string
+        # 'example username', so leaving it unset fails with "Error establishing a
+        # database connection". WORDPRESS_DB_NAME is set explicitly to pair with
+        # MYSQL_DATABASE below; it happens to equal the image default, and omitting it
+        # works today, but stating it means a future default change cannot surprise us.
+        - name: WORDPRESS_DB_NAME
+          value: wordpress
+        - name: WORDPRESS_DB_USER
+          value: wordpress
         - name: WORDPRESS_DB_PASSWORD
           valueFrom:
             secretKeyRef:
               name: mysql-password
-              key: password
+              key: wordpress-password
         ports:
         - containerPort: 80
           name: wordpress
         volumeMounts:
         - name: wordpress-persistent-storage
           mountPath: /var/www/html
+          # See the note in service-and-deployment-mysql.yaml. Both deployments share
+          # efs-pv-claim, so each needs its own subPath or the document root and the MySQL
+          # datadir are the same directory.
+          subPath: wordpress
       volumes:
       - name: wordpress-persistent-storage
         persistentVolumeClaim:
-          claimName: efs-pvc-claim
+          # efs-pv-claim, not efs-pvc-claim. The only PVC defined for this variant is
+          # efs/eks/pvc.yaml -> efs-pv-claim, so the old name resolved to nothing and this
+          # pod could never be scheduled. Note both deployments now name the same claim:
+          # that is how the single-PVC EFS variant was written, and it means MySQL's datadir
+          # and WordPress's html tree land on one file system root. Separate subPath mounts
+          # would be the proper fix; that needs an EFS file system to test against and is
+          # deliberately not attempted here.
+          claimName: efs-pv-claim

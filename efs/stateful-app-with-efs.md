@@ -133,7 +133,7 @@ aws ec2 authorize-security-group-ingress \
 
 Output:
 
-```shell
+```json
 {
     "Return": true,
     "SecurityGroupRules": [
@@ -376,8 +376,42 @@ persistentvolumeclaim/efs-pv-claim created
 ### Create secret for MySQL password
 
 ```shell
-kubectl create secret generic mysql-password --from-literal=password=Jhdsg55swGsgsa23 --namespace=dev-stateful-efs
+kubectl create secret generic mysql-password --from-literal=password=$(openssl rand -base64 24) \
+  --from-literal=wordpress-password=$(openssl rand -base64 24) --namespace=dev-stateful-efs
 ```
+
+⚠️ **Only generate fresh values against an empty file system.** This variant retains its EFS
+data (`persistentVolumeReclaimPolicy: Retain`), so on a second run through this walkthrough the
+MySQL directory already exists — and **MySQL only applies `MYSQL_PASSWORD` when it initialises an
+empty data directory**. Generate a new secret over retained data and the `wordpress` database
+account keeps its *old* password while WordPress is handed the new one, so the app cannot connect
+and neither side reports anything about a password mismatch.
+
+Measured on `mysql:8.0`, reusing one volume across two starts:
+
+```text
+run 1, empty datadir,  MYSQL_PASSWORD=FIRSTPASS   -> wordpress user created with FIRSTPASS
+run 2, same volume,    MYSQL_PASSWORD=SECONDPASS  -> ERROR 1045 (28000): Access denied
+                                                     for user 'wordpress'@'localhost'
+run 2, same volume,    old FIRSTPASS              -> still works
+```
+
+So on a re-run, pick one:
+
+- **Keep the data**: do not recreate the secret. Leave the existing `mysql-password` in place, and
+  if it is gone, recover the values rather than inventing them:
+
+  ```shell
+  kubectl get secret mysql-password --namespace=dev-stateful-efs \
+    -o jsonpath='{.data.wordpress-password}' | base64 -d; echo
+  ```
+
+- **Start clean**: delete the EFS file system, or empty the `mysql/` directory on it, *before*
+  creating a new secret. The [Clean up](#efs) section covers this, and note that deleting the PVC
+  and PV does **not** remove the data.
+
+The EBS variant does not have this problem in the same way: its volumes are `Delete` reclaim
+policy, so a fresh run genuinely starts empty.
 
 Output:
 
@@ -396,7 +430,7 @@ Output:
 ```shell
 NAME                  TYPE                                  DATA   AGE
 default-token-fnzpq   kubernetes.io/service-account-token   3      32m
-mysql-password        Opaque                                1      50s
+mysql-password        Opaque                                2      50s
 ```
 
 ### Create Service and Deployment for MySQL
@@ -420,7 +454,7 @@ kubectl get pods -o wide -n dev-stateful-efs
 
 Output:
 
-```shell
+```text
 NAME                               READY   STATUS    RESTARTS   AGE     IP              NODE                                         NOMINATED NODE   READINESS GATES
 wordpress-mysql-7d5dc78494-vvfxk   1/1     Running   0          7m29s   192.168.47.27   ip-192-168-53-8.us-west-1.compute.internal   <none>           <none>
 ```
@@ -441,7 +475,7 @@ sudo mount | grep csi
 
 Sample output:
 
-```shell
+```text
 127.0.0.1:/ on /var/lib/kubelet/pods/414ce7a8-ade5-4e1b-a2ea-d7e7350e80d9/volumes/kubernetes.io~csi/efs-psv-eks/mount type nfs4 (rw,relatime,vers=4.1,rsize=1048576,wsize=1048576,namlen=255,hard,noresvport,proto=tcp,port=20079,timeo=600,retrans=2,sec=sys,clientaddr=127.0.0.1,local_lock=none,addr=127.0.0.1)
 ```
 
@@ -523,45 +557,71 @@ deployment.apps "wordpress-mysql" deleted
 
 ### EFS
 
-Go to `EFS` in `AWS Console` https://us-west-1.console.aws.amazon.com/efs/home?region=us-west-1#/file-systems: and delete the filesystem (example: EKSwithEFS)
-
-Then, run `kubectl get pv` and delete the following `pv`
-* efs-psv-eks
+**Claim first, then the PV, and the file system outlives both.** This differs from the EBS
+variant, and the difference is the reclaim policy: `efs/eks/pv.yaml` sets
+`persistentVolumeReclaimPolicy: Retain` against a fixed `volumeHandle`. Under `Retain`,
+deleting the claim moves the PV to `Released` rather than deleting it, and nothing touches the
+data.
 
 ```shell
+kubectl -n dev-stateful-efs delete pvc efs-pv-claim
+
 kubectl delete pv efs-psv-eks
 ```
 
-Sample output:
+The `-n` is not optional for the claim: it lives in `dev-stateful-efs`, so without it the
+command runs against your current context, reports `NotFound`, and the claim survives. The PV
+takes no namespace, because a PersistentVolume is cluster-scoped.
 
-```shell
-persistentvolume "efs-psv-eks" deleted
-```
+**Deleting both leaves the data intact**, which is the part that surprises people. The file
+system and everything in it survive, and because the PV names a fixed `volumeHandle`, re-applying
+`efs/eks/pv.yaml` and the claim binds the same file system and the old WordPress install is
+still there. So this step is required rather than tidying, and it is the only one that removes
+the data:
 
-At this point, if you check your pvs you will see they are in terminating status:
+Go to `EFS` in `AWS Console` https://us-west-1.console.aws.amazon.com/efs/home?region=us-west-1#/file-systems: and delete the filesystem (example: EKSwithEFS)
 
-```shell
+Do that **after** the Kubernetes objects, not before. Deleting the file system first leaves the
+PV pointing at a `volumeHandle` that no longer exists.
+
+<details>
+<summary>What this section used to say, and why it left the PV stuck in Terminating</summary>
+
+The original deleted the file system in the console first, then ran `kubectl delete pv` while
+the claim still existed. A PV cannot finish deleting while a claim is bound to it, so it sat in
+`Terminating`:
+
+```text
 NAME          CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS        CLAIM                           STORAGECLASS   REASON   AGE
 efs-psv-eks   20Gi       RWX            Retain           Terminating   dev-stateful-efs/efs-pv-claim   efs-sc                  24h
 ```
 
-Now, we are going to set the status to lost
+It then cleared the finalizer by hand, described as setting the status to lost:
 
-```shell
+```text
 kubectl patch pv efs-psv-eks -p '{"metadata":{"finalizers":null}}'
 ```
 
-Output:
+That removes the API object without releasing anything, and it is only needed because the
+deletion happened in the wrong order. Both blocks are quoted so the old instructions are
+recognisable, not to be run.
 
-```shell
-persistentvolume/efs-psv-eks patched
-```
+</details>
+
+**Not re-verified against EFS.** The corrected order is the documented behaviour of the
+`Retain` reclaim policy, and this repository's verification ran on k3s with local-path storage,
+not on EKS with EFS. See the README for what was and was not exercised.
 
 ### Delete secret
 
 ```shell
-kubectl delete secret mysql-password
+kubectl delete secret mysql-password --namespace=dev-stateful-efs
 ```
+
+The secret was created with `--namespace=dev-stateful-efs`, so deleting it needs the same flag.
+Without it, measured on Kubernetes 1.31: `Error from server (NotFound): secrets
+"mysql-password" not found`, exit status 1, and the secret holding the MySQL root password and
+the WordPress database password stays in the cluster.
 
 **The following part is the DELETE section of `basic-aws-eks`**
 
@@ -595,7 +655,7 @@ eksctl delete cluster -f eks/cluster-autoscaling.yaml
 
 Output:
 
-```shell
+```text
 2022-08-09 10:02:07 [ℹ]  deleting EKS cluster "basic-eks-cluster"
 2022-08-09 10:02:07 [ℹ]  deleted 0 Fargate profile(s)
 2022-08-09 10:02:08 [✔]  kubeconfig has been updated
@@ -605,11 +665,59 @@ Output:
 2022-08-09 10:02:09 [✔]  all cluster resources were deleted
 ```
 
-### Delete CFN tacks
+### Delete the CFN stack
+
+This is the step that removes the IAM users and their access keys. It used to name
+`service-support`, a stack this project never creates, so the documented cleanup left the users
+and any keys made for them active.
+
+**Delete the access keys first, then the stack.** The order is not cosmetic. A stack delete
+tears down the `AWS::IAM::User` resources, and per AWS's `DeleteUser` API reference, "when you
+delete a user programmatically, you must delete the items attached to the user manually, or the
+deletion fails", with access keys named explicitly and `DeleteConflict` (HTTP 409) as the error.
+Keys you created by hand are not part of the stack, so leaving them in place can fail the
+delete and leave the users, and their keys, in the account.
+
+The usernames come off the deployed stack rather than being hard-coded, because
+`eks-operator`, `eks-admin-user` and `eks-user` are only the parameter *defaults* in
+`cfn/eks-project.yml`. That is a second reason this runs before the delete: the stack must still
+exist to be queried.
 
 ```shell
-aws cloudformation delete-stack --stack-name 	service-support
+aws cloudformation describe-stacks \
+  --stack-name eks-project \
+  --region us-west-1 \
+  --query "Stacks[0].Parameters[?ParameterKey=='EKSUserName'||ParameterKey=='EKSAdminUserName'||ParameterKey=='EKSRegularUserName'].ParameterValue" \
+  --output text \
+  | tr '\t' '\n' \
+  | while read -r u; do
+      [ -n "$u" ] || continue
+      for k in $(aws iam list-access-keys --user-name "$u" \
+                   --query 'AccessKeyMetadata[].AccessKeyId' --output text 2>/dev/null); do
+        echo "deleting access key $k for $u"
+        aws iam delete-access-key --user-name "$u" --access-key-id "$k"
+      done
+    done
 ```
+
+`tr` plus `while read` rather than `USERS=$(...)`, because `--output text` returns the names
+tab-separated on one line and **zsh does not word-split an unquoted variable**, so the shorter
+form collapses all three into a single name on a default macOS shell.
+
+Then the stack, with the delete guarded before the wait:
+
+```shell
+if aws cloudformation delete-stack --stack-name eks-project --region us-west-1; then
+  aws cloudformation wait stack-delete-complete --stack-name eks-project --region us-west-1
+else
+  echo "delete-stack failed, so not waiting on it" >&2
+fi
+```
+
+`wait` turns a failed deletion into a non-zero exit rather than something found months later, but
+it is a bad way to learn the delete call itself was rejected: its waiter is `delay=30s` with
+`maxAttempts=120`, so 60 minutes before exit 255, and no acceptor matches a stack left untouched
+in `CREATE_COMPLETE`. The `if` reports that case immediately.
 
 ### Delete user password from parameter store
 
